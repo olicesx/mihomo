@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	N "github.com/metacubex/mihomo/common/net"
+
 	"github.com/metacubex/http"
 	"github.com/metacubex/http/h2c"
 )
@@ -178,9 +180,6 @@ func (h *requestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, h.path)
 	parts := splitNonEmpty(rest)
 
-	remoteAddr := remoteAddrFromRequest(r)
-	localAddr := &net.TCPAddr{}
-
 	// stream-one: POST /path
 	if r.Method == http.MethodPost && len(parts) == 0 {
 		w.Header().Set("X-Accel-Buffering", "no")
@@ -192,13 +191,12 @@ func (h *requestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		httpSC := newHTTPServerConn(w, r.Body)
 		conn := &Conn{
-			writer:     httpSC,
-			reader:     httpSC,
-			remoteAddr: remoteAddr,
-			localAddr:  localAddr,
+			writer: httpSC,
+			reader: httpSC,
 		}
+		conn.SetAddrFromRequest(r)
 
-		go h.connHandler(conn)
+		go h.connHandler(N.NewDeadlineConn(conn))
 
 		select {
 		case <-r.Context().Done():
@@ -224,16 +222,15 @@ func (h *requestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		httpSC := newHTTPServerConn(w, r.Body)
 		conn := &Conn{
-			writer:     httpSC,
-			reader:     session.uploadQueue,
-			remoteAddr: remoteAddr,
-			localAddr:  localAddr,
+			writer: httpSC,
+			reader: session.uploadQueue,
 			onClose: func() {
 				h.deleteSession(sessionID)
 			},
 		}
+		conn.SetAddrFromRequest(r)
 
-		go h.connHandler(conn)
+		go h.connHandler(N.NewDeadlineConn(conn))
 
 		select {
 		case <-r.Context().Done():
@@ -306,12 +303,4 @@ func equalHost(a, b string) bool {
 	}
 
 	return a == b
-}
-
-func remoteAddrFromRequest(r *http.Request) net.Addr {
-	addr, err := net.ResolveTCPAddr("tcp", r.RemoteAddr)
-	if err != nil {
-		return &net.TCPAddr{}
-	}
-	return addr
 }

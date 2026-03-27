@@ -13,8 +13,10 @@ import (
 	"time"
 
 	"github.com/metacubex/mihomo/common/contextutils"
+	"github.com/metacubex/mihomo/transport/gun"
 
 	"github.com/metacubex/http"
+	"github.com/metacubex/http/httptrace"
 	"github.com/metacubex/tls"
 )
 
@@ -22,27 +24,21 @@ type DialRawFunc func(ctx context.Context) (net.Conn, error)
 type WrapTLSFunc func(ctx context.Context, conn net.Conn, isH2 bool) (net.Conn, error)
 
 type PacketUpConn struct {
-	ctx        context.Context
-	cfg        *Config
-	address    string
-	port       int
-	host       string
-	sessionID  string
-	client     *http.Client
-	writeMu    sync.Mutex
-	seq        uint64
-	reader     io.ReadCloser
-	remoteAddr net.Addr
-	localAddr  net.Addr
-}
+	ctx       context.Context
+	cfg       *Config
+	address   string
+	port      int
+	host      string
+	sessionID string
+	client    *http.Client
+	writeMu   sync.Mutex
+	seq       uint64
+	reader    io.ReadCloser
+	gun.NetAddr
 
-type stringAddr struct {
-	network string
-	addr    string
+	// deadlines
+	deadline *time.Timer
 }
-
-func (a stringAddr) Network() string { return a.network }
-func (a stringAddr) String() string  { return a.addr }
 
 func (c *PacketUpConn) Read(b []byte) (int, error) {
 	return c.reader.Read(b)
@@ -92,23 +88,25 @@ func (c *PacketUpConn) Close() error {
 	return nil
 }
 
-func (c *PacketUpConn) LocalAddr() net.Addr {
-	return c.localAddr
-}
-
-func (c *PacketUpConn) RemoteAddr() net.Addr {
-	return c.remoteAddr
-}
+func (c *PacketUpConn) SetReadDeadline(t time.Time) error  { return c.SetDeadline(t) }
+func (c *PacketUpConn) SetWriteDeadline(t time.Time) error { return c.SetDeadline(t) }
 
 func (c *PacketUpConn) SetDeadline(t time.Time) error {
-	return nil
-}
-
-func (c *PacketUpConn) SetReadDeadline(t time.Time) error {
-	return nil
-}
-
-func (c *PacketUpConn) SetWriteDeadline(t time.Time) error {
+	if t.IsZero() {
+		if c.deadline != nil {
+			c.deadline.Stop()
+			c.deadline = nil
+		}
+		return nil
+	}
+	d := time.Until(t)
+	if c.deadline != nil {
+		c.deadline.Reset(d)
+		return nil
+	}
+	c.deadline = time.AfterFunc(d, func() {
+		c.Close()
+	})
 	return nil
 }
 
@@ -120,11 +118,6 @@ func DialStreamOne(
 	dialRaw DialRawFunc,
 	wrapTLS WrapTLSFunc,
 ) (net.Conn, error) {
-	remoteAddr := stringAddr{
-		network: "tcp",
-		addr:    net.JoinHostPort(address, strconv.Itoa(port)),
-	}
-
 	host := cfg.Host
 	if host == "" {
 		host = address
@@ -157,7 +150,18 @@ func DialStreamOne(
 
 	pr, pw := io.Pipe()
 
-	req, err := http.NewRequestWithContext(contextutils.WithoutCancel(ctx), http.MethodPost, requestURL.String(), pr)
+	conn := &Conn{
+		writer: pw,
+	}
+
+	trace := &httptrace.ClientTrace{
+		GotConn: func(connInfo httptrace.GotConnInfo) {
+			conn.SetLocalAddr(connInfo.Conn.LocalAddr())
+			conn.SetRemoteAddr(connInfo.Conn.RemoteAddr())
+		},
+	}
+
+	req, err := http.NewRequestWithContext(httptrace.WithClientTrace(contextutils.WithoutCancel(ctx), trace), http.MethodPost, requestURL.String(), pr)
 	if err != nil {
 		_ = pr.Close()
 		_ = pw.Close()
@@ -195,17 +199,13 @@ func DialStreamOne(
 		_ = pw.Close()
 		return nil, fmt.Errorf("xhttp stream-one bad status: %s", result.resp.Status)
 	}
+	conn.reader = result.resp.Body
+	conn.onClose = func() {
+		_ = result.resp.Body.Close()
+		_ = pr.Close()
+	}
 
-	return &Conn{
-		writer:     pw,
-		reader:     result.resp.Body,
-		remoteAddr: remoteAddr,
-		localAddr:  remoteAddr,
-		onClose: func() {
-			_ = result.resp.Body.Close()
-			_ = pr.Close()
-		},
-	}, nil
+	return conn, nil
 }
 
 func DialPacketUp(
@@ -216,11 +216,6 @@ func DialPacketUp(
 	dialRaw DialRawFunc,
 	wrapTLS WrapTLSFunc,
 ) (net.Conn, error) {
-	remoteAddr := stringAddr{
-		network: "tcp",
-		addr:    net.JoinHostPort(address, strconv.Itoa(port)),
-	}
-
 	host := cfg.Host
 	if host == "" {
 		host = address
@@ -251,7 +246,25 @@ func DialPacketUp(
 		Path:   cfg.NormalizedPath(),
 	}
 
-	req, err := http.NewRequestWithContext(contextutils.WithoutCancel(ctx), http.MethodGet, downloadURL.String(), nil)
+	conn := &PacketUpConn{
+		ctx:       contextutils.WithoutCancel(ctx),
+		cfg:       cfg,
+		address:   address,
+		port:      port,
+		host:      host,
+		sessionID: sessionID,
+		client:    client,
+		seq:       0,
+	}
+
+	trace := &httptrace.ClientTrace{
+		GotConn: func(connInfo httptrace.GotConnInfo) {
+			conn.SetLocalAddr(connInfo.Conn.LocalAddr())
+			conn.SetRemoteAddr(connInfo.Conn.RemoteAddr())
+		},
+	}
+
+	req, err := http.NewRequestWithContext(httptrace.WithClientTrace(conn.ctx, trace), http.MethodGet, downloadURL.String(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -268,20 +281,9 @@ func DialPacketUp(
 		_ = resp.Body.Close()
 		return nil, fmt.Errorf("xhttp packet-up download bad status: %s", resp.Status)
 	}
+	conn.reader = resp.Body
 
-	return &PacketUpConn{
-		ctx:        contextutils.WithoutCancel(ctx),
-		cfg:        cfg,
-		address:    address,
-		port:       port,
-		host:       host,
-		sessionID:  sessionID,
-		client:     client,
-		seq:        0,
-		reader:     resp.Body,
-		remoteAddr: remoteAddr,
-		localAddr:  remoteAddr,
-	}, nil
+	return conn, nil
 }
 
 func newSessionID() string {

@@ -2,16 +2,19 @@ package xhttp
 
 import (
 	"io"
-	"net"
 	"time"
+
+	"github.com/metacubex/mihomo/transport/gun"
 )
 
 type Conn struct {
-	writer     io.WriteCloser
-	reader     io.ReadCloser
-	remoteAddr net.Addr
-	localAddr  net.Addr
-	onClose    func()
+	writer  io.WriteCloser
+	reader  io.ReadCloser
+	onClose func()
+	gun.NetAddr
+
+	// deadlines
+	deadline *time.Timer
 }
 
 func (c *Conn) Write(b []byte) (int, error) {
@@ -38,22 +41,24 @@ func (c *Conn) Close() error {
 	return nil
 }
 
-func (c *Conn) LocalAddr() net.Addr {
-	return c.localAddr
-}
-
-func (c *Conn) RemoteAddr() net.Addr {
-	return c.remoteAddr
-}
+func (c *Conn) SetReadDeadline(t time.Time) error  { return c.SetDeadline(t) }
+func (c *Conn) SetWriteDeadline(t time.Time) error { return c.SetDeadline(t) }
 
 func (c *Conn) SetDeadline(t time.Time) error {
-	return nil
-}
-
-func (c *Conn) SetReadDeadline(t time.Time) error {
-	return nil
-}
-
-func (c *Conn) SetWriteDeadline(t time.Time) error {
+	if t.IsZero() {
+		if c.deadline != nil {
+			c.deadline.Stop()
+			c.deadline = nil
+		}
+		return nil
+	}
+	d := time.Until(t)
+	if c.deadline != nil {
+		c.deadline.Reset(d)
+		return nil
+	}
+	c.deadline = time.AfterFunc(d, func() {
+		c.Close()
+	})
 	return nil
 }
