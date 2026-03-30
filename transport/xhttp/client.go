@@ -75,7 +75,6 @@ func DialStreamOne(ctx context.Context, cfg *Config, newTransport RoundTripperFa
 	if err != nil {
 		return nil, err
 	}
-
 	requestURL := url.URL{
 		Scheme: "https",
 		Host:   cfg.Host,
@@ -142,7 +141,6 @@ func DialStreamUp(
 		httputils.CloseTransport(uploadTransport)
 		return nil, err
 	}
-
 	sessionID := newSessionID()
 	downloadCfg := cfg.DownloadRequestConfig()
 
