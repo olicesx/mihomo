@@ -496,3 +496,180 @@ func TestInboundVless_Reality_XHTTP(t *testing.T) {
 	}
 	testInboundVless(t, inboundOptions, outboundOptions)
 }
+
+func testOutboundVlessXHTTP(t *testing.T, outboundOptions outbound.VlessOption, frontendOption testXHTTPFrontendOption) {
+	t.Parallel()
+
+	tunnel := NewHttpTestTunnel()
+	defer tunnel.Close()
+
+	frontendOption.BackendAddr = startTestVlessBackend(t, tunnel)
+	addrPort, err := netip.ParseAddrPort(startTestXHTTPFrontend(t, frontendOption))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	outboundOptions.Name = "vless_xhttp_outbound"
+	outboundOptions.Server = addrPort.Addr().String()
+	outboundOptions.Port = int(addrPort.Port())
+	outboundOptions.UUID = userUUID
+
+	out, err := outbound.NewVless(outboundOptions)
+	if !assert.NoError(t, err) {
+		return
+	}
+	defer out.Close()
+
+	tunnel.DoTest(t, out)
+	testSingMux(t, tunnel, out)
+}
+
+func TestOutboundVless_XHTTP(t *testing.T) {
+	testOutboundVlessXHTTP(t, outbound.VlessOption{
+		TLS:         true,
+		Fingerprint: tlsFingerprint,
+		Network:     "xhttp",
+		ALPN:        []string{"h2"},
+		XHTTPOpts: outbound.XHTTPOptions{
+			Path: "/vless-outbound-xhttp",
+			Host: "example.com",
+			Mode: "auto",
+		},
+	}, testXHTTPFrontendOption{
+		Path: "/vless-outbound-xhttp",
+		Host: "example.com",
+		Mode: "auto",
+	})
+}
+
+func TestOutboundVless_XHTTP_StreamOne(t *testing.T) {
+	testOutboundVlessXHTTP(t, outbound.VlessOption{
+		TLS:         true,
+		Fingerprint: tlsFingerprint,
+		Network:     "xhttp",
+		ALPN:        []string{"h2"},
+		XHTTPOpts: outbound.XHTTPOptions{
+			Path: "/vless-outbound-xhttp-stream-one",
+			Host: "example.com",
+			Mode: "stream-one",
+		},
+	}, testXHTTPFrontendOption{
+		Path: "/vless-outbound-xhttp-stream-one",
+		Host: "example.com",
+		Mode: "stream-one",
+	})
+}
+
+func TestOutboundVless_XHTTP_StreamUp(t *testing.T) {
+	testOutboundVlessXHTTP(t, outbound.VlessOption{
+		TLS:         true,
+		Fingerprint: tlsFingerprint,
+		Network:     "xhttp",
+		ALPN:        []string{"h2"},
+		XHTTPOpts: outbound.XHTTPOptions{
+			Path: "/vless-outbound-xhttp-stream-up",
+			Host: "example.com",
+			Mode: "stream-up",
+		},
+	}, testXHTTPFrontendOption{
+		Path: "/vless-outbound-xhttp-stream-up",
+		Host: "example.com",
+		Mode: "stream-up",
+	})
+}
+
+func TestOutboundVless_XHTTP_DownloadSettings(t *testing.T) {
+	t.Parallel()
+
+	tunnel := NewHttpTestTunnel()
+	defer tunnel.Close()
+
+	addrs := startTestSharedXHTTPFrontends(t, startTestVlessBackend(t, tunnel), "auto",
+		testXHTTPFrontendOption{
+			Path: "/vless-outbound-xhttp-upload",
+			Host: "upload.example.com",
+		},
+		testXHTTPFrontendOption{
+			Path: "/vless-outbound-xhttp-download",
+			Host: "download.example.com",
+		},
+	)
+
+	uploadAddr, err := netip.ParseAddrPort(addrs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	downloadAddr, err := netip.ParseAddrPort(addrs[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := outbound.NewVless(outbound.VlessOption{
+		Name:        "vless_xhttp_outbound",
+		Server:      uploadAddr.Addr().String(),
+		Port:        int(uploadAddr.Port()),
+		UUID:        userUUID,
+		TLS:         true,
+		Fingerprint: tlsFingerprint,
+		ServerName:  "upload.example.com",
+		Network:     "xhttp",
+		ALPN:        []string{"h2"},
+		XHTTPOpts: outbound.XHTTPOptions{
+			Path: "/vless-outbound-xhttp-upload",
+			Host: "upload.example.com",
+			Mode: "auto",
+			DownloadSettings: &outbound.XHTTPDownloadSettings{
+				Server:     downloadAddr.Addr().String(),
+				Port:       int(downloadAddr.Port()),
+				TLS:        boolPtr(true),
+				ServerName: "download.example.com",
+				Host:       "download.example.com",
+				Path:       "/vless-outbound-xhttp-download",
+			},
+		},
+	})
+	if !assert.NoError(t, err) {
+		return
+	}
+	defer out.Close()
+
+	tunnel.DoTest(t, out)
+	testSingMux(t, tunnel, out)
+}
+
+func TestOutboundVless_SplitHTTP_PacketUp(t *testing.T) {
+	testOutboundVlessXHTTP(t, outbound.VlessOption{
+		TLS:         true,
+		Fingerprint: tlsFingerprint,
+		Network:     "splithttp",
+		ALPN:        []string{"h2"},
+		SplitHTTPOpts: outbound.SplitHTTPOptions{
+			Path: "/vless-outbound-splithttp-packet-up",
+			Host: "example.com",
+			Mode: "packet-up",
+		},
+	}, testXHTTPFrontendOption{
+		Path: "/vless-outbound-splithttp-packet-up",
+		Host: "example.com",
+		Mode: "packet-up",
+	})
+}
+
+func TestOutboundVless_SplitHTTP_Auto_H3(t *testing.T) {
+	testOutboundVlessXHTTP(t, outbound.VlessOption{
+		TLS:         true,
+		Fingerprint: tlsFingerprint,
+		Network:     "splithttp",
+		ALPN:        []string{"h3"},
+		SplitHTTPOpts: outbound.SplitHTTPOptions{
+			Path: "/vless-outbound-splithttp-auto-h3",
+			Host: "example.com",
+			Mode: "auto",
+		},
+	}, testXHTTPFrontendOption{
+		Path:     "/vless-outbound-splithttp-auto-h3",
+		Host:     "example.com",
+		Mode:     "auto",
+		UseHTTP3: true,
+	})
+}

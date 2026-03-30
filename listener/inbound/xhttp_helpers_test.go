@@ -1,8 +1,10 @@
 package inbound_test
 
 import (
+	"context"
 	"io"
 	"net"
+	"strings"
 	"testing"
 
 	adapterInbound "github.com/metacubex/mihomo/adapter/inbound"
@@ -10,12 +12,14 @@ import (
 	C "github.com/metacubex/mihomo/constant"
 	listenerInbound "github.com/metacubex/mihomo/listener/inbound"
 	"github.com/metacubex/mihomo/listener/sing"
+	listenerSingVless "github.com/metacubex/mihomo/listener/sing_vless"
 	"github.com/metacubex/mihomo/transport/socks5"
 	transportTrojan "github.com/metacubex/mihomo/transport/trojan"
 	"github.com/metacubex/mihomo/transport/xhttp"
 
 	"github.com/metacubex/http"
 	"github.com/metacubex/quic-go/http3"
+	M "github.com/metacubex/sing/common/metadata"
 	"github.com/metacubex/tls"
 )
 
@@ -25,6 +29,10 @@ type testXHTTPFrontendOption struct {
 	Mode        string
 	BackendAddr string
 	UseHTTP3    bool
+}
+
+type testSharedXHTTPFrontend struct {
+	handler http.Handler
 }
 
 // These helpers provide a local xhttp frontend so outbound xhttp modes can be
@@ -46,7 +54,45 @@ func startTestXHTTPFrontend(t *testing.T, option testXHTTPFrontendOption) string
 		},
 	})
 
-	if option.UseHTTP3 {
+	return startTestXHTTPServer(t, handler, option.UseHTTP3)
+}
+
+func startTestSharedXHTTPFrontends(t *testing.T, backendAddr string, mode string, options ...testXHTTPFrontendOption) []string {
+	t.Helper()
+
+	frontend := &testSharedXHTTPFrontend{
+		handler: xhttp.NewServerHandler(xhttp.ServerOption{
+			Path: "/",
+			Mode: mode,
+			ConnHandler: func(conn net.Conn) {
+				backendConn, err := net.Dial("tcp", backendAddr)
+				if err != nil {
+					_ = conn.Close()
+					return
+				}
+				N.Relay(conn, backendConn)
+			},
+		}),
+	}
+
+	addrs := make([]string, len(options))
+	for idx, option := range options {
+		addrs[idx] = frontend.startAlias(t, option)
+	}
+
+	return addrs
+}
+
+func (f *testSharedXHTTPFrontend) startAlias(t *testing.T, option testXHTTPFrontendOption) string {
+	t.Helper()
+
+	return startTestXHTTPServer(t, wrapTestXHTTPAliasHandler(f.handler, option), option.UseHTTP3)
+}
+
+func startTestXHTTPServer(t *testing.T, handler http.Handler, useHTTP3 bool) string {
+	t.Helper()
+
+	if useHTTP3 {
 		packetConn, err := net.ListenPacket("udp", "127.0.0.1:0")
 		if err != nil {
 			t.Fatal(err)
@@ -87,6 +133,55 @@ func startTestXHTTPFrontend(t *testing.T, option testXHTTPFrontendOption) string
 	return ln.Addr().String()
 }
 
+func wrapTestXHTTPAliasHandler(inner http.Handler, option testXHTTPFrontendOption) http.Handler {
+	path := option.Path
+	if path == "" {
+		path = "/"
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	if !strings.HasSuffix(path, "/") {
+		path += "/"
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if option.Host != "" && !equalTestXHTTPHost(r.Host, option.Host) {
+			http.NotFound(w, r)
+			return
+		}
+		if !strings.HasPrefix(r.URL.Path, path) {
+			http.NotFound(w, r)
+			return
+		}
+
+		cloned := r.Clone(r.Context())
+		suffix := strings.TrimPrefix(r.URL.Path, path)
+		if suffix == "" {
+			cloned.URL.Path = "/"
+		} else {
+			cloned.URL.Path = "/" + suffix
+		}
+		cloned.RequestURI = ""
+
+		inner.ServeHTTP(w, cloned)
+	})
+}
+
+func equalTestXHTTPHost(a string, b string) bool {
+	a = strings.ToLower(a)
+	b = strings.ToLower(b)
+
+	if ah, _, err := net.SplitHostPort(a); err == nil {
+		a = ah
+	}
+	if bh, _, err := net.SplitHostPort(b); err == nil {
+		b = bh
+	}
+
+	return a == b
+}
+
 func startTestVMessBackend(t *testing.T, tunnel *TestTunnel) string {
 	t.Helper()
 
@@ -114,6 +209,60 @@ func startTestVMessBackend(t *testing.T, tunnel *TestTunnel) string {
 	})
 
 	return in.Address()
+}
+
+func startTestVlessBackend(t *testing.T, tunnel *TestTunnel) string {
+	t.Helper()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	additions := []adapterInbound.Addition{
+		adapterInbound.WithInName("DEFAULT-VLESS"),
+		adapterInbound.WithSpecialRules(""),
+	}
+	handler, err := sing.NewListenerHandler(sing.ListenerConfig{
+		Tunnel:    tunnel,
+		Type:      C.VLESS,
+		Additions: additions,
+	})
+	if err != nil {
+		_ = ln.Close()
+		t.Fatal(err)
+	}
+
+	service := listenerSingVless.NewService[string](handler)
+	service.UpdateUsers([]string{"test"}, []string{userUUID}, []string{""})
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+
+			go handleTestVlessConn(conn, service, additions)
+		}
+	}()
+
+	t.Cleanup(func() {
+		_ = ln.Close()
+	})
+
+	return ln.Addr().String()
+}
+
+func handleTestVlessConn(conn net.Conn, service *listenerSingVless.Service[string], additions []adapterInbound.Addition) {
+	ctx := sing.WithAdditions(context.TODO(), additions...)
+	err := service.NewConnection(ctx, conn, M.Metadata{
+		Protocol: "vless",
+		Source:   M.SocksaddrFromNet(conn.RemoteAddr()),
+	})
+	if err != nil {
+		_ = conn.Close()
+	}
 }
 
 func startTestTrojanBackend(t *testing.T, tunnel *TestTunnel, password string) string {

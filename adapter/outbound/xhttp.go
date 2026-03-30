@@ -34,7 +34,6 @@ type XHTTPOptions struct {
 type XHTTPDownloadSettings struct {
 	Server            string            `proxy:"server,omitempty"`
 	Port              int               `proxy:"port,omitempty"`
-	Network           string            `proxy:"network,omitempty"`
 	TLS               *bool             `proxy:"tls,omitempty"`
 	Headers           map[string]string `proxy:"headers,omitempty"`
 	Host              string            `proxy:"host,omitempty"`
@@ -90,15 +89,6 @@ func selectXHTTPOptions(network string, primary XHTTPOptions, compat SplitHTTPOp
 			return primary
 		}
 		return compat
-	}
-}
-
-func isXHTTPNetwork(network string) bool {
-	switch strings.ToLower(strings.TrimSpace(network)) {
-	case "xhttp", "splithttp":
-		return true
-	default:
-		return false
 	}
 }
 
@@ -173,10 +163,6 @@ func buildXHTTPConfig(network string, addr string, serverName string, alpn []str
 	}
 
 	if ds := option.DownloadSettings; ds != nil {
-		if ds.Network != "" && !isXHTTPNetwork(ds.Network) {
-			return nil, fmt.Errorf("xhttp download-settings network must be xhttp or splithttp")
-		}
-
 		realityCfg, err := ds.RealityOpts.Parse()
 		if err != nil {
 			return nil, err

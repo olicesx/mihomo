@@ -378,26 +378,64 @@ func TestOutboundVMess_XHTTP_StreamUp(t *testing.T) {
 }
 
 func TestOutboundVMess_XHTTP_DownloadSettings(t *testing.T) {
-	testOutboundVMessXHTTP(t, outbound.VmessOption{
+	t.Parallel()
+
+	tunnel := NewHttpTestTunnel()
+	defer tunnel.Close()
+
+	addrs := startTestSharedXHTTPFrontends(t, startTestVMessBackend(t, tunnel), "auto",
+		testXHTTPFrontendOption{
+			Path: "/vmess-xhttp-upload",
+			Host: "upload.example.com",
+		},
+		testXHTTPFrontendOption{
+			Path: "/vmess-xhttp-download",
+			Host: "download.example.com",
+		},
+	)
+
+	uploadAddr, err := netip.ParseAddrPort(addrs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	downloadAddr, err := netip.ParseAddrPort(addrs[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := outbound.NewVmess(outbound.VmessOption{
+		Name:        "vmess_xhttp_outbound",
+		Server:      uploadAddr.Addr().String(),
+		Port:        int(uploadAddr.Port()),
+		UUID:        userUUID,
+		AlterID:     0,
+		Cipher:      "auto",
 		TLS:         true,
 		Fingerprint: tlsFingerprint,
+		ServerName:  "upload.example.com",
 		Network:     "xhttp",
 		ALPN:        []string{"h2"},
 		XHTTPOpts: outbound.XHTTPOptions{
-			Path: "/vmess-xhttp-download",
-			Host: "example.com",
+			Path: "/vmess-xhttp-upload",
+			Host: "upload.example.com",
 			Mode: "auto",
 			DownloadSettings: &outbound.XHTTPDownloadSettings{
-				TLS:  boolPtr(true),
-				Host: "example.com",
-				Path: "/vmess-xhttp-download",
+				Server:     downloadAddr.Addr().String(),
+				Port:       int(downloadAddr.Port()),
+				TLS:        boolPtr(true),
+				ServerName: "download.example.com",
+				Host:       "download.example.com",
+				Path:       "/vmess-xhttp-download",
 			},
 		},
-	}, testXHTTPFrontendOption{
-		Path: "/vmess-xhttp-download",
-		Host: "example.com",
-		Mode: "auto",
 	})
+	if !assert.NoError(t, err) {
+		return
+	}
+	defer out.Close()
+
+	tunnel.DoTest(t, out)
+	testSingMux(t, tunnel, out)
 }
 
 func TestOutboundVMess_SplitHTTP_PacketUp(t *testing.T) {

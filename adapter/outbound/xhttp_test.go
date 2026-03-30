@@ -67,6 +67,16 @@ func TestXHTTPTLSOptionsCloneForDownload(t *testing.T) {
 		})
 		assert.ErrorContains(t, err, "reality-opts requires tls")
 	})
+
+	t.Run("OverrideServerNameAndFingerprint", func(t *testing.T) {
+		clone, err := base.cloneForDownload(&xhttp.DownloadConfig{
+			ServerName:        "download.example.com",
+			ClientFingerprint: "firefox",
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, "download.example.com", clone.ServerName)
+		assert.Equal(t, "firefox", clone.ClientFingerprint)
+	})
 }
 
 func TestBuildXHTTPConfigUsesNetworkSpecificOptions(t *testing.T) {
@@ -103,15 +113,6 @@ func TestBuildXHTTPConfigUsesNetworkSpecificOptions(t *testing.T) {
 	}
 	assert.Equal(t, "/splithttp", cfg.Path)
 	assert.Equal(t, "split.example.com", cfg.Host)
-}
-
-func TestBuildXHTTPConfigRejectsInvalidDownloadNetwork(t *testing.T) {
-	_, err := buildXHTTPConfig("xhttp", "example.com:443", "", nil, XHTTPOptions{
-		DownloadSettings: &XHTTPDownloadSettings{
-			Network: "grpc",
-		},
-	}, SplitHTTPOptions{}, false)
-	assert.ErrorContains(t, err, "download-settings network must be xhttp or splithttp")
 }
 
 func TestDialXHTTPConnRejectsStreamOneWithDownloadSettings(t *testing.T) {
