@@ -293,3 +293,146 @@ func TestInboundVMess_Reality_Grpc(t *testing.T) {
 	}
 	testInboundVMess(t, inboundOptions, outboundOptions)
 }
+
+func testOutboundVMessXHTTP(t *testing.T, outboundOptions outbound.VmessOption, frontendOption testXHTTPFrontendOption) {
+	t.Parallel()
+
+	tunnel := NewHttpTestTunnel()
+	defer tunnel.Close()
+
+	frontendOption.BackendAddr = startTestVMessBackend(t, tunnel)
+	addrPort, err := netip.ParseAddrPort(startTestXHTTPFrontend(t, frontendOption))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	outboundOptions.Name = "vmess_xhttp_outbound"
+	outboundOptions.Server = addrPort.Addr().String()
+	outboundOptions.Port = int(addrPort.Port())
+	outboundOptions.UUID = userUUID
+	outboundOptions.AlterID = 0
+	outboundOptions.Cipher = "auto"
+
+	out, err := outbound.NewVmess(outboundOptions)
+	if !assert.NoError(t, err) {
+		return
+	}
+	defer out.Close()
+
+	tunnel.DoTest(t, out)
+	testSingMux(t, tunnel, out)
+}
+
+func TestOutboundVMess_XHTTP(t *testing.T) {
+	testOutboundVMessXHTTP(t, outbound.VmessOption{
+		TLS:         true,
+		Fingerprint: tlsFingerprint,
+		Network:     "xhttp",
+		ALPN:        []string{"h2"},
+		XHTTPOpts: outbound.XHTTPOptions{
+			Path: "/vmess-xhttp",
+			Host: "example.com",
+			Mode: "auto",
+		},
+	}, testXHTTPFrontendOption{
+		Path: "/vmess-xhttp",
+		Host: "example.com",
+		Mode: "auto",
+	})
+}
+
+func TestOutboundVMess_XHTTP_StreamOne(t *testing.T) {
+	testOutboundVMessXHTTP(t, outbound.VmessOption{
+		TLS:         true,
+		Fingerprint: tlsFingerprint,
+		Network:     "xhttp",
+		ALPN:        []string{"h2"},
+		XHTTPOpts: outbound.XHTTPOptions{
+			Path: "/vmess-xhttp-stream-one",
+			Host: "example.com",
+			Mode: "stream-one",
+		},
+	}, testXHTTPFrontendOption{
+		Path: "/vmess-xhttp-stream-one",
+		Host: "example.com",
+		Mode: "stream-one",
+	})
+}
+
+func TestOutboundVMess_XHTTP_StreamUp(t *testing.T) {
+	testOutboundVMessXHTTP(t, outbound.VmessOption{
+		TLS:         true,
+		Fingerprint: tlsFingerprint,
+		Network:     "xhttp",
+		ALPN:        []string{"h2"},
+		XHTTPOpts: outbound.XHTTPOptions{
+			Path: "/vmess-xhttp-stream-up",
+			Host: "example.com",
+			Mode: "stream-up",
+		},
+	}, testXHTTPFrontendOption{
+		Path: "/vmess-xhttp-stream-up",
+		Host: "example.com",
+		Mode: "stream-up",
+	})
+}
+
+func TestOutboundVMess_XHTTP_DownloadSettings(t *testing.T) {
+	testOutboundVMessXHTTP(t, outbound.VmessOption{
+		TLS:         true,
+		Fingerprint: tlsFingerprint,
+		Network:     "xhttp",
+		ALPN:        []string{"h2"},
+		XHTTPOpts: outbound.XHTTPOptions{
+			Path: "/vmess-xhttp-download",
+			Host: "example.com",
+			Mode: "auto",
+			DownloadSettings: &outbound.XHTTPDownloadSettings{
+				TLS:  boolPtr(true),
+				Host: "example.com",
+				Path: "/vmess-xhttp-download",
+			},
+		},
+	}, testXHTTPFrontendOption{
+		Path: "/vmess-xhttp-download",
+		Host: "example.com",
+		Mode: "auto",
+	})
+}
+
+func TestOutboundVMess_SplitHTTP_PacketUp(t *testing.T) {
+	testOutboundVMessXHTTP(t, outbound.VmessOption{
+		TLS:         true,
+		Fingerprint: tlsFingerprint,
+		Network:     "splithttp",
+		ALPN:        []string{"h2"},
+		SplitHTTPOpts: outbound.SplitHTTPOptions{
+			Path: "/vmess-splithttp-packet-up",
+			Host: "example.com",
+			Mode: "packet-up",
+		},
+	}, testXHTTPFrontendOption{
+		Path: "/vmess-splithttp-packet-up",
+		Host: "example.com",
+		Mode: "packet-up",
+	})
+}
+
+func TestOutboundVMess_SplitHTTP_Auto_H3(t *testing.T) {
+	testOutboundVMessXHTTP(t, outbound.VmessOption{
+		TLS:         true,
+		Fingerprint: tlsFingerprint,
+		Network:     "splithttp",
+		ALPN:        []string{"h3"},
+		SplitHTTPOpts: outbound.SplitHTTPOptions{
+			Path: "/vmess-splithttp-auto-h3",
+			Host: "example.com",
+			Mode: "auto",
+		},
+	}, testXHTTPFrontendOption{
+		Path:     "/vmess-splithttp-auto-h3",
+		Host:     "example.com",
+		Mode:     "auto",
+		UseHTTP3: true,
+	})
+}

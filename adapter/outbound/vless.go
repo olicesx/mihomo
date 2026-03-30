@@ -17,7 +17,6 @@ import (
 	"github.com/metacubex/mihomo/transport/vless"
 	"github.com/metacubex/mihomo/transport/vless/encryption"
 	"github.com/metacubex/mihomo/transport/vmess"
-	"github.com/metacubex/mihomo/transport/xhttp"
 
 	"github.com/metacubex/http"
 	vmessSing "github.com/metacubex/sing-vmess"
@@ -62,6 +61,7 @@ type VlessOption struct {
 	GrpcOpts          GrpcOptions       `proxy:"grpc-opts,omitempty"`
 	WSOpts            WSOptions         `proxy:"ws-opts,omitempty"`
 	XHTTPOpts         XHTTPOptions      `proxy:"xhttp-opts,omitempty"`
+	SplitHTTPOpts     SplitHTTPOptions  `proxy:"splithttp-opts,omitempty"`
 	WSHeaders         map[string]string `proxy:"ws-headers,omitempty"`
 	SkipCertVerify    bool              `proxy:"skip-cert-verify,omitempty"`
 	Fingerprint       string            `proxy:"fingerprint,omitempty"`
@@ -69,15 +69,6 @@ type VlessOption struct {
 	PrivateKey        string            `proxy:"private-key,omitempty"`
 	ServerName        string            `proxy:"servername,omitempty"`
 	ClientFingerprint string            `proxy:"client-fingerprint,omitempty"`
-}
-
-type XHTTPOptions struct {
-	Path          string            `proxy:"path,omitempty"`
-	Host          string            `proxy:"host,omitempty"`
-	Mode          string            `proxy:"mode,omitempty"`
-	Headers       map[string]string `proxy:"headers,omitempty"`
-	NoGRPCHeader  bool              `proxy:"no-grpc-header,omitempty"`
-	XPaddingBytes string            `proxy:"x-padding-bytes,omitempty"`
 }
 
 func (v *Vless) StreamConnContext(ctx context.Context, c net.Conn, metadata *C.Metadata) (_ net.Conn, err error) {
@@ -161,7 +152,7 @@ func (v *Vless) StreamConnContext(ctx context.Context, c net.Conn, metadata *C.M
 		c, err = vmess.StreamH2Conn(ctx, c, h2Opts)
 	case "grpc":
 		break // already handle in gun transport
-	case "xhttp":
+	case "xhttp", "splithttp":
 		break // already handle in dialXHTTPConn
 	default:
 		// default tcp network
@@ -242,57 +233,29 @@ func (v *Vless) streamTLSConn(ctx context.Context, conn net.Conn, isH2 bool) (ne
 }
 
 func (v *Vless) dialXHTTPConn(ctx context.Context) (net.Conn, error) {
-	requestHost := v.option.XHTTPOpts.Host
-	if requestHost == "" {
-		if v.option.ServerName != "" {
-			requestHost = v.option.ServerName
-		} else {
-			requestHost = v.option.Server
-		}
+	cfg, err := buildXHTTPConfig(v.option.Network, v.addr, v.option.ServerName, v.option.ALPN, v.option.XHTTPOpts, v.option.SplitHTTPOpts, v.realityConfig != nil)
+	if err != nil {
+		return nil, err
 	}
 
-	cfg := &xhttp.Config{
-		Host:          requestHost,
-		Path:          v.option.XHTTPOpts.Path,
-		Mode:          v.option.XHTTPOpts.Mode,
-		Headers:       v.option.XHTTPOpts.Headers,
-		NoGRPCHeader:  v.option.XHTTPOpts.NoGRPCHeader,
-		XPaddingBytes: v.option.XHTTPOpts.XPaddingBytes,
-	}
-
-	mode := cfg.EffectiveMode(v.realityConfig != nil)
-
-	switch mode {
-	case "stream-one":
-		return xhttp.DialStreamOne(
-			ctx,
-			cfg,
-			func(ctx context.Context) (net.Conn, error) {
-				return v.dialer.DialContext(ctx, "tcp", v.addr)
-			},
-			func(ctx context.Context, raw net.Conn, isH2 bool) (net.Conn, error) {
-				return v.streamTLSConn(ctx, raw, isH2)
-			},
-		)
-	case "packet-up":
-		return xhttp.DialPacketUp(
-			ctx,
-			cfg,
-			func(ctx context.Context) (net.Conn, error) {
-				return v.dialer.DialContext(ctx, "tcp", v.addr)
-			},
-			func(ctx context.Context, raw net.Conn, isH2 bool) (net.Conn, error) {
-				return v.streamTLSConn(ctx, raw, isH2)
-			},
-		)
-	default:
-		return nil, fmt.Errorf("xhttp mode %s is not implemented yet", mode)
-	}
+	return dialXHTTPConn(ctx, v.dialer, cfg, xhttpTLSOptions{
+		Address:           v.addr,
+		TLSEnabled:        v.option.TLS,
+		ServerName:        v.option.ServerName,
+		SkipCertVerify:    v.option.SkipCertVerify,
+		Fingerprint:       v.option.Fingerprint,
+		Certificate:       v.option.Certificate,
+		PrivateKey:        v.option.PrivateKey,
+		ClientFingerprint: v.option.ClientFingerprint,
+		ALPN:              cfg.ALPN,
+		ECH:               v.echConfig,
+		Reality:           v.realityConfig,
+	})
 }
 
 func (v *Vless) dialContext(ctx context.Context) (c net.Conn, err error) {
 	switch v.option.Network {
-	case "xhttp":
+	case "xhttp", "splithttp":
 		return v.dialXHTTPConn(ctx)
 	case "grpc": // gun transport
 		return v.gunTransport.Dial()

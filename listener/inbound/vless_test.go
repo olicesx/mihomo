@@ -11,6 +11,10 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func boolPtr(v bool) *bool {
+	return &v
+}
+
 func testInboundVless(t *testing.T, inboundOptions inbound.VlessOption, outboundOptions outbound.VlessOption) {
 	t.Parallel()
 	inboundOptions.BaseOption = inbound.BaseOption{
@@ -359,6 +363,107 @@ func TestInboundVless_XHTTP(t *testing.T) {
 			Path: "/vless-xhttp",
 			Host: "example.com",
 			Mode: "auto",
+		},
+	}
+	testInboundVlessTLS(t, inboundOptions, outboundOptions, false)
+}
+
+func TestInboundVless_XHTTP_StreamOne(t *testing.T) {
+	inboundOptions := inbound.VlessOption{
+		Certificate: tlsCertificate,
+		PrivateKey:  tlsPrivateKey,
+		XHTTPConfig: inbound.XHTTPConfig{
+			Path: "/vless-xhttp-stream-one",
+			Host: "example.com",
+			Mode: "stream-one",
+		},
+	}
+	outboundOptions := outbound.VlessOption{
+		TLS:         true,
+		Fingerprint: tlsFingerprint,
+		Network:     "xhttp",
+		ALPN:        []string{"h2"},
+		XHTTPOpts: outbound.XHTTPOptions{
+			Path: "/vless-xhttp-stream-one",
+			Host: "example.com",
+			Mode: "stream-one",
+		},
+	}
+	testInboundVlessTLS(t, inboundOptions, outboundOptions, false)
+}
+
+func TestInboundVless_XHTTP_StreamUp(t *testing.T) {
+	inboundOptions := inbound.VlessOption{
+		Certificate: tlsCertificate,
+		PrivateKey:  tlsPrivateKey,
+		XHTTPConfig: inbound.XHTTPConfig{
+			Path: "/vless-xhttp-stream-up",
+			Host: "example.com",
+			Mode: "stream-up",
+		},
+	}
+	outboundOptions := outbound.VlessOption{
+		TLS:         true,
+		Fingerprint: tlsFingerprint,
+		Network:     "xhttp",
+		ALPN:        []string{"h2"},
+		XHTTPOpts: outbound.XHTTPOptions{
+			Path: "/vless-xhttp-stream-up",
+			Host: "example.com",
+			Mode: "stream-up",
+		},
+	}
+	testInboundVlessTLS(t, inboundOptions, outboundOptions, false)
+}
+
+func TestInboundVless_XHTTP_DownloadSettings(t *testing.T) {
+	inboundOptions := inbound.VlessOption{
+		Certificate: tlsCertificate,
+		PrivateKey:  tlsPrivateKey,
+		XHTTPConfig: inbound.XHTTPConfig{
+			Path: "/vless-xhttp-download",
+			Host: "example.com",
+			Mode: "auto",
+		},
+	}
+	outboundOptions := outbound.VlessOption{
+		TLS:         true,
+		Fingerprint: tlsFingerprint,
+		Network:     "xhttp",
+		ALPN:        []string{"h2"},
+		XHTTPOpts: outbound.XHTTPOptions{
+			Path: "/vless-xhttp-download",
+			Host: "example.com",
+			Mode: "auto",
+			DownloadSettings: &outbound.XHTTPDownloadSettings{
+				TLS:  boolPtr(true),
+				Host: "example.com",
+				Path: "/vless-xhttp-download",
+			},
+		},
+	}
+	testInboundVlessTLS(t, inboundOptions, outboundOptions, false)
+}
+
+func TestInboundVless_SplitHTTP_PacketUp(t *testing.T) {
+	inboundOptions := inbound.VlessOption{
+		Certificate: tlsCertificate,
+		PrivateKey:  tlsPrivateKey,
+		XHTTPConfig: inbound.XHTTPConfig{
+			Path: "/vless-splithttp-packet-up",
+			Host: "example.com",
+			Mode: "packet-up",
+		},
+	}
+	outboundOptions := outbound.VlessOption{
+		TLS:         true,
+		Fingerprint: tlsFingerprint,
+		Network:     "splithttp",
+		ALPN:        []string{"h2"},
+		SplitHTTPOpts: outbound.SplitHTTPOptions{
+			Path: "/vless-splithttp-packet-up",
+			Host: "example.com",
+			Mode: "packet-up",
 		},
 	}
 	testInboundVlessTLS(t, inboundOptions, outboundOptions, false)
