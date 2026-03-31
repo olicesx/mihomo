@@ -405,25 +405,14 @@ func TestInboundVless_XHTTP_DownloadSettings(t *testing.T) {
 	outboundOptions := outbound.VlessOption{
 		TLS:               true,
 		Fingerprint:       tlsFingerprint,
-		SkipCertVerify:    true,
 		ServerName:        "example.org",
 		ClientFingerprint: "chrome",
 		Network:           "xhttp",
 		XHTTPOpts: outbound.XHTTPOptions{
-			Path: "/vless-xhttp",
-			Host: "example.com",
-			Mode: "auto",
-			DownloadSettings: &outbound.XHTTPDownloadSettings{
-				Server:            "example.com",
-				Port:              443,
-				Network:           "xhttp",
-				Host:              "example.com",
-				Path:              "/vless-xhttp",
-				Mode:              "stream-up",
-				ServerName:        "example.org",
-				ClientFingerprint: "chrome",
-				SkipCertVerify:    true,
-			},
+			Path:             "/vless-xhttp",
+			Host:             "example.com",
+			Mode:             "stream-up",
+			DownloadSettings: &outbound.XHTTPDownloadSettings{},
 		},
 	}
 	testInboundVlessTLS(t, inboundOptions, outboundOptions, false)

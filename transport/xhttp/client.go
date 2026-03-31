@@ -138,52 +138,27 @@ func DialStreamOne(cfg *Config, transport http.RoundTripper) (net.Conn, error) {
 	return conn, nil
 }
 
-func DialStreamUp(
-	cfg *Config,
-	uploadTransport http.RoundTripper,
-	downloadTransport http.RoundTripper,
-	address string,
-	port int,
-) (net.Conn, error) {
-	host := cfg.Host
-	if host == "" {
-		host = address
-	}
-
+func DialStreamUp(cfg *Config, uploadTransport http.RoundTripper, downloadTransport http.RoundTripper) (net.Conn, error) {
 	downloadCfg := cfg
-	if ds := cfg.DownloadSettings; ds != nil {
-		downloadCfg = &Config{
-			Host:             ds.Host,
-			Path:             ds.Path,
-			Mode:             ds.Mode,
-			Headers:          cfg.Headers,
-			NoGRPCHeader:     cfg.NoGRPCHeader,
-			XPaddingBytes:    cfg.XPaddingBytes,
-			DownloadSettings: nil,
-		}
+	if ds := cfg.DownloadConfig; ds != nil {
+		downloadCfg = ds
 	}
-
-	downloadHost := downloadCfg.Host
-	if downloadHost == "" {
-		downloadHost = host
-	}
-
-	_ = port
 
 	streamURL := url.URL{
 		Scheme: "https",
-		Host:   host,
+		Host:   cfg.Host,
 		Path:   cfg.NormalizedPath(),
 	}
 
 	downloadURL := url.URL{
 		Scheme: "https",
-		Host:   downloadHost,
+		Host:   downloadCfg.Host,
 		Path:   downloadCfg.NormalizedPath(),
 	}
+	pr, pw := io.Pipe()
 
 	ctx := context.Background()
-	conn := &Conn{}
+	conn := &Conn{writer: pw}
 
 	sessionID := newSessionID()
 
@@ -204,7 +179,7 @@ func DialStreamUp(
 		httputils.CloseTransport(downloadTransport)
 		return nil, err
 	}
-	downloadReq.Host = downloadHost
+	downloadReq.Host = downloadCfg.Host
 
 	downloadResp, err := downloadTransport.RoundTrip(downloadReq)
 	if err != nil {
@@ -218,8 +193,6 @@ func DialStreamUp(
 		httputils.CloseTransport(downloadTransport)
 		return nil, fmt.Errorf("xhttp stream-up download bad status: %s", downloadResp.Status)
 	}
-
-	pr, pw := io.Pipe()
 
 	uploadReq, err := http.NewRequestWithContext(
 		contextutils.WithoutCancel(ctx),
@@ -244,7 +217,7 @@ func DialStreamUp(
 		httputils.CloseTransport(downloadTransport)
 		return nil, err
 	}
-	uploadReq.Host = host
+	uploadReq.Host = cfg.Host
 
 	go func() {
 		resp, err := uploadTransport.RoundTrip(uploadReq)
@@ -260,7 +233,6 @@ func DialStreamUp(
 		}
 	}()
 
-	conn.writer = pw
 	conn.reader = downloadResp.Body
 	conn.onClose = func() {
 		_ = downloadResp.Body.Close()
