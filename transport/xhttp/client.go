@@ -93,12 +93,12 @@ func NewTransport(dialRaw DialRawFunc, wrapTLS WrapTLSFunc) http.RoundTripper {
 }
 
 type Client struct {
+	ctx                   context.Context
+	cancel                context.CancelFunc
 	mode                  string
 	cfg                   *Config
 	makeTransport         TransportMaker
 	makeDownloadTransport TransportMaker
-	ctx                   context.Context
-	cancel                context.CancelFunc
 	uploadManager         *reuseManager
 	downloadManager       *reuseManager
 }
@@ -123,6 +123,9 @@ func NewClient(cfg *Config, makeTransport TransportMaker, makeDownloadTransport 
 	if cfg.ReuseConfig != nil {
 		client.uploadManager = newReuseManager(cfg.ReuseConfig)
 		if cfg.DownloadConfig != nil {
+			if makeDownloadTransport == nil {
+				return nil, fmt.Errorf("xhttp: download manager requires download transport maker")
+			}
 			client.downloadManager = newReuseManager(cfg.DownloadConfig.ReuseConfig)
 		}
 	}
@@ -160,34 +163,54 @@ func (c *Client) Dial() (net.Conn, error) {
 	}
 }
 
-func (c *Client) DialStreamOne() (net.Conn, error) {
+func (c *Client) getTransport() (uploadTransport http.RoundTripper, downloadTransport http.RoundTripper, onClose func(), err error) {
 	if c.uploadManager == nil {
-		uploadTransport := c.makeTransport()
-		return c.dialStreamOne(uploadTransport, func() {
+		uploadTransport = c.makeTransport()
+		downloadTransport = uploadTransport
+		if c.makeDownloadTransport != nil {
+			downloadTransport = c.makeDownloadTransport()
+		}
+		onClose = func() {
 			httputils.CloseTransport(uploadTransport)
-		})
+			if downloadTransport != uploadTransport {
+				httputils.CloseTransport(downloadTransport)
+			}
+		}
+		return
 	}
 
 	uploadEntry, err := c.uploadManager.getOrCreate(c.makeTransport)
 	if err != nil {
-		return nil, err
+		return
 	}
-	uploadTransport := uploadEntry.transport
+	uploadTransport = uploadEntry.transport
 
-	conn, err := c.dialStreamOne(uploadTransport, func() {
+	var downloadEntry *reuseEntry
+	downloadTransport = uploadTransport
+
+	if c.downloadManager != nil {
+		downloadEntry, err = c.downloadManager.getOrCreate(c.makeDownloadTransport)
+		if err != nil {
+			c.uploadManager.release(uploadEntry)
+			return
+		}
+		downloadTransport = downloadEntry.transport
+	}
+	onClose = func() {
 		c.uploadManager.release(uploadEntry)
-	})
+		if downloadEntry != nil {
+			c.downloadManager.release(downloadEntry)
+		}
+	}
+	return
+}
+
+func (c *Client) DialStreamOne() (net.Conn, error) {
+	transport, _, onClose, err := c.getTransport()
 	if err != nil {
 		return nil, err
 	}
 
-	return conn, nil
-}
-
-func (c *Client) dialStreamOne(
-	transport http.RoundTripper,
-	onClose func(),
-) (net.Conn, error) {
 	requestURL := url.URL{
 		Scheme: "https",
 		Host:   c.cfg.Host,
@@ -237,62 +260,11 @@ func (c *Client) dialStreamOne(
 }
 
 func (c *Client) DialStreamUp() (net.Conn, error) {
-	if c.uploadManager == nil {
-		uploadTransport := c.makeTransport()
-		downloadTransport := uploadTransport
-		if c.makeDownloadTransport != nil {
-			downloadTransport = c.makeDownloadTransport()
-		}
-
-		return c.dialStreamUp(uploadTransport, downloadTransport, func() {
-			httputils.CloseTransport(uploadTransport)
-			if downloadTransport != uploadTransport {
-				httputils.CloseTransport(downloadTransport)
-			}
-		})
-	}
-
-	uploadEntry, err := c.uploadManager.getOrCreate(c.makeTransport)
-	if err != nil {
-		return nil, err
-	}
-	uploadTransport := uploadEntry.transport
-
-	var downloadEntry *reuseEntry
-	downloadTransport := uploadTransport
-
-	if c.downloadManager != nil {
-		if c.makeDownloadTransport == nil {
-			c.uploadManager.release(uploadEntry)
-			return nil, fmt.Errorf("xhttp: download manager requires download transport maker")
-		}
-
-		downloadEntry, err = c.downloadManager.getOrCreate(c.makeDownloadTransport)
-		if err != nil {
-			c.uploadManager.release(uploadEntry)
-			return nil, err
-		}
-		downloadTransport = downloadEntry.transport
-	}
-
-	conn, err := c.dialStreamUp(uploadTransport, downloadTransport, func() {
-		c.uploadManager.release(uploadEntry)
-		if downloadEntry != nil {
-			c.downloadManager.release(downloadEntry)
-		}
-	})
+	uploadTransport, downloadTransport, onClose, err := c.getTransport()
 	if err != nil {
 		return nil, err
 	}
 
-	return conn, nil
-}
-
-func (c *Client) dialStreamUp(
-	uploadTransport http.RoundTripper,
-	downloadTransport http.RoundTripper,
-	onClose func(),
-) (net.Conn, error) {
 	downloadCfg := c.cfg
 	if ds := c.cfg.DownloadConfig; ds != nil {
 		downloadCfg = ds
@@ -390,62 +362,11 @@ func (c *Client) dialStreamUp(
 }
 
 func (c *Client) DialPacketUp() (net.Conn, error) {
-	if c.uploadManager == nil {
-		uploadTransport := c.makeTransport()
-		downloadTransport := uploadTransport
-		if c.makeDownloadTransport != nil {
-			downloadTransport = c.makeDownloadTransport()
-		}
-
-		return c.dialPacketUp(uploadTransport, downloadTransport, func() {
-			httputils.CloseTransport(uploadTransport)
-			if downloadTransport != uploadTransport {
-				httputils.CloseTransport(downloadTransport)
-			}
-		})
-	}
-
-	uploadEntry, err := c.uploadManager.getOrCreate(c.makeTransport)
-	if err != nil {
-		return nil, err
-	}
-	uploadTransport := uploadEntry.transport
-
-	var downloadEntry *reuseEntry
-	downloadTransport := uploadTransport
-
-	if c.downloadManager != nil {
-		if c.makeDownloadTransport == nil {
-			c.uploadManager.release(uploadEntry)
-			return nil, fmt.Errorf("xhttp: download manager requires download transport maker")
-		}
-
-		downloadEntry, err = c.downloadManager.getOrCreate(c.makeDownloadTransport)
-		if err != nil {
-			c.uploadManager.release(uploadEntry)
-			return nil, err
-		}
-		downloadTransport = downloadEntry.transport
-	}
-
-	conn, err := c.dialPacketUp(uploadTransport, downloadTransport, func() {
-		c.uploadManager.release(uploadEntry)
-		if downloadEntry != nil {
-			c.downloadManager.release(downloadEntry)
-		}
-	})
+	uploadTransport, downloadTransport, onClose, err := c.getTransport()
 	if err != nil {
 		return nil, err
 	}
 
-	return conn, nil
-}
-
-func (c *Client) dialPacketUp(
-	uploadTransport http.RoundTripper,
-	downloadTransport http.RoundTripper,
-	onClose func(),
-) (net.Conn, error) {
 	downloadCfg := c.cfg
 	if ds := c.cfg.DownloadConfig; ds != nil {
 		downloadCfg = ds
