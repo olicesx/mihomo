@@ -241,6 +241,35 @@ func TestRequestBodyPipeBuffersInitialWrite(t *testing.T) {
 	}
 }
 
+func TestRequestBodyPipeBuffersVisionSizedBurst(t *testing.T) {
+	pipe := newRequestBodyPipe(requestBodyBufferSize)
+	writeDone := make(chan error, 1)
+	payload := make([]byte, 128*1024)
+
+	go func() {
+		_, err := pipe.Write(payload)
+		writeDone <- err
+	}()
+
+	select {
+	case err := <-writeDone:
+		if err != nil {
+			t.Fatalf("unexpected write error: %v", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("vision-sized startup burst blocked before the reader consumed any data")
+	}
+
+	buf := make([]byte, len(payload))
+	n, err := io.ReadFull(pipe, buf)
+	if err != nil {
+		t.Fatalf("unexpected read error: %v", err)
+	}
+	if n != len(payload) {
+		t.Fatalf("expected to read %d bytes, got %d", len(payload), n)
+	}
+}
+
 func TestRequestBodyPipeRespectsBufferLimit(t *testing.T) {
 	pipe := newRequestBodyPipe(4)
 	writeDone := make(chan error, 1)

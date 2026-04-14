@@ -37,7 +37,10 @@ var defaultHeader = http.Header{
 	"User-Agent":   []string{"grpc-go/1.36.0"},
 }
 
-const requestBodyBufferSize = 64 * 1024
+// xtls-rprx-vision can emit a startup burst noticeably larger than the
+// application payload. Keep enough headroom so the first encrypted writes do
+// not re-couple gun startup to HTTP/2 request-body reads on slower runtimes.
+const requestBodyBufferSize = 256 * 1024
 
 type DialFn = func(ctx context.Context, network, addr string) (net.Conn, error)
 
