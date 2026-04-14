@@ -460,3 +460,40 @@ func TestTransportDialBuffersLargeInitialWrite(t *testing.T) {
 		t.Fatal("RoundTrip did not receive the large buffered payload")
 	}
 }
+
+func TestClientDefaultPoolSpreadsStreamsAcrossTransports(t *testing.T) {
+	client := NewClient(func() *Transport { return &Transport{} }, 0, 0, 0)
+
+	if client.maxConnections != defaultMaxConnections {
+		t.Fatalf("expected default maxConnections %d, got %d", defaultMaxConnections, client.maxConnections)
+	}
+	if client.minStreams != defaultMinStreams {
+		t.Fatalf("expected default minStreams %d, got %d", defaultMinStreams, client.minStreams)
+	}
+
+	seen := make(map[*Transport]struct{})
+	for i := 0; i < defaultMaxConnections*defaultMinStreams+1; i++ {
+		transport := client.getTransport()
+		seen[transport] = struct{}{}
+		transport.count.Add(1)
+	}
+
+	if len(seen) != defaultMaxConnections {
+		t.Fatalf("expected default pool to grow to %d transports, got %d", defaultMaxConnections, len(seen))
+	}
+}
+
+func TestClientExplicitSingleConnectionKeepsSingleTransport(t *testing.T) {
+	client := NewClient(func() *Transport { return &Transport{} }, 1, 0, 0)
+
+	seen := make(map[*Transport]struct{})
+	for i := 0; i < defaultMaxConnections*defaultMinStreams+1; i++ {
+		transport := client.getTransport()
+		seen[transport] = struct{}{}
+		transport.count.Add(1)
+	}
+
+	if len(seen) != 1 {
+		t.Fatalf("expected explicit single-connection config to keep one transport, got %d", len(seen))
+	}
+}

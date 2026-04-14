@@ -42,6 +42,11 @@ var defaultHeader = http.Header{
 // to wait for RoundTrip to begin consuming the request body.
 const requestBodyBufferSize = 256 * 1024
 
+const (
+	defaultMaxConnections = 8
+	defaultMinStreams     = 5
+)
+
 type DialFn = func(ctx context.Context, network, addr string) (net.Conn, error)
 
 type Conn struct {
@@ -506,7 +511,8 @@ type Client struct {
 
 func NewClient(maker func() *Transport, maxConnections, minStreams, maxStreams int) *Client {
 	if maxConnections == 0 && minStreams == 0 && maxStreams == 0 {
-		maxConnections = 1
+		maxConnections = defaultMaxConnections
+		minStreams = defaultMinStreams
 	}
 	return &Client{
 		maxConnections: maxConnections,
