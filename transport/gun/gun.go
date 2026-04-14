@@ -37,9 +37,9 @@ var defaultHeader = http.Header{
 	"User-Agent":   []string{"grpc-go/1.36.0"},
 }
 
-// xtls-rprx-vision can emit a startup burst noticeably larger than the
-// application payload. Keep enough headroom so the first encrypted writes do
-// not re-couple gun startup to HTTP/2 request-body reads on slower runtimes.
+// Keep a bounded steady-state backlog once the HTTP/2 transport starts reading
+// request bodies. Startup writes are buffered independently so they never have
+// to wait for RoundTrip to begin consuming the request body.
 const requestBodyBufferSize = 256 * 1024
 
 type DialFn = func(ctx context.Context, network, addr string) (net.Conn, error)
@@ -76,6 +76,7 @@ type requestBodyPipe struct {
 	mu      sync.Mutex
 	cond    *sync.Cond
 	buf     []byte
+	started bool
 	closed  bool
 	readErr error
 	maxSize int
@@ -90,6 +91,9 @@ func newRequestBodyPipe(maxSize int) *requestBodyPipe {
 func (p *requestBodyPipe) Read(b []byte) (int, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	p.started = true
+	p.cond.Broadcast()
 
 	for len(p.buf) == 0 && !p.closed {
 		p.cond.Wait()
@@ -114,17 +118,22 @@ func (p *requestBodyPipe) Write(b []byte) (int, error) {
 
 	written := 0
 	for written < len(b) {
-		for len(p.buf) >= p.maxSize && !p.closed {
-			p.cond.Wait()
-		}
-
 		if p.closed {
 			return written, io.ErrClosedPipe
 		}
 
-		space := p.maxSize - len(p.buf)
-		if space > len(b)-written {
-			space = len(b) - written
+		space := len(b) - written
+		if p.started {
+			for len(p.buf) >= p.maxSize && !p.closed {
+				p.cond.Wait()
+			}
+			if p.closed {
+				return written, io.ErrClosedPipe
+			}
+			space = p.maxSize - len(p.buf)
+			if space > len(b)-written {
+				space = len(b) - written
+			}
 		}
 		p.buf = append(p.buf, b[written:written+space]...)
 		written += space

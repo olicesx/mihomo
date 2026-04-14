@@ -244,7 +244,7 @@ func TestRequestBodyPipeBuffersInitialWrite(t *testing.T) {
 func TestRequestBodyPipeBuffersVisionSizedBurst(t *testing.T) {
 	pipe := newRequestBodyPipe(requestBodyBufferSize)
 	writeDone := make(chan error, 1)
-	payload := make([]byte, 128*1024)
+	payload := make([]byte, requestBodyBufferSize*2)
 
 	go func() {
 		_, err := pipe.Write(payload)
@@ -257,7 +257,7 @@ func TestRequestBodyPipeBuffersVisionSizedBurst(t *testing.T) {
 			t.Fatalf("unexpected write error: %v", err)
 		}
 	case <-time.After(100 * time.Millisecond):
-		t.Fatal("vision-sized startup burst blocked before the reader consumed any data")
+		t.Fatal("startup burst larger than the steady-state limit blocked before the reader consumed any data")
 	}
 
 	buf := make([]byte, len(payload))
@@ -272,26 +272,50 @@ func TestRequestBodyPipeBuffersVisionSizedBurst(t *testing.T) {
 
 func TestRequestBodyPipeRespectsBufferLimit(t *testing.T) {
 	pipe := newRequestBodyPipe(4)
-	writeDone := make(chan error, 1)
+	initialWriteDone := make(chan error, 1)
 
 	go func() {
 		_, err := pipe.Write([]byte("hello"))
+		initialWriteDone <- err
+	}()
+
+	select {
+	case err := <-initialWriteDone:
+		if err != nil {
+			t.Fatalf("unexpected initial write error: %v", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("startup write blocked before any reader started")
+	}
+
+	head := make([]byte, 1)
+	n, err := io.ReadFull(pipe, head)
+	if err != nil {
+		t.Fatalf("unexpected head read error: %v", err)
+	}
+	if n != 1 || string(head) != "h" {
+		t.Fatalf("unexpected head byte: %q", head[:n])
+	}
+
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := pipe.Write([]byte("!"))
 		writeDone <- err
 	}()
 
 	select {
 	case <-writeDone:
-		t.Fatal("Write completed before the reader made room in the buffer")
+		t.Fatal("Write completed before the started reader made room in the buffer")
 	case <-time.After(100 * time.Millisecond):
 	}
 
 	buf := make([]byte, 4)
-	n, err := io.ReadFull(pipe, buf)
+	n, err = io.ReadFull(pipe, buf)
 	if err != nil {
 		t.Fatalf("unexpected read error: %v", err)
 	}
-	if n != 4 || string(buf) != "hell" {
-		t.Fatalf("unexpected prefix: %q", buf[:n])
+	if n != 4 || string(buf) != "ello" {
+		t.Fatalf("unexpected buffered bytes: %q", buf[:n])
 	}
 
 	select {
@@ -308,7 +332,7 @@ func TestRequestBodyPipeRespectsBufferLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected tail read error: %v", err)
 	}
-	if n != 1 || string(one) != "o" {
+	if n != 1 || string(one) != "!" {
 		t.Fatalf("unexpected tail byte: %q", one[:n])
 	}
 }
@@ -371,5 +395,68 @@ func TestTransportDialBuffersInitialWrite(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("RoundTrip did not receive the buffered payload")
+	}
+}
+
+func TestTransportDialBuffersLargeInitialWrite(t *testing.T) {
+	started := make(chan struct{})
+	allowRead := make(chan struct{})
+	bodyRead := make(chan int, 1)
+	payload := make([]byte, requestBodyBufferSize*2)
+
+	transport := &Transport{
+		transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			close(started)
+			<-allowRead
+			expectedLen := 5 + 1 + UVarintLen(uint64(len(payload))) + len(payload)
+			buf := make([]byte, expectedLen)
+			if _, err := io.ReadFull(req.Body, buf); err != nil {
+				return nil, err
+			}
+			bodyRead <- len(buf)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       &testReadCloser{closeCh: make(chan struct{})},
+				Request:    req,
+			}, nil
+		}),
+		cfg:    &Config{Host: "example.com:443"},
+		ctx:    context.Background(),
+		cancel: func() {},
+	}
+
+	conn, err := transport.Dial()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	<-started
+
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := conn.Write(payload)
+		writeDone <- err
+	}()
+
+	select {
+	case err := <-writeDone:
+		if err != nil {
+			t.Fatalf("unexpected write error: %v", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("large initial Write blocked until RoundTrip started reading")
+	}
+
+	close(allowRead)
+
+	select {
+	case got := <-bodyRead:
+		expectedLen := 5 + 1 + UVarintLen(uint64(len(payload))) + len(payload)
+		if got != expectedLen {
+			t.Fatalf("expected RoundTrip to receive %d bytes, got %d", expectedLen, got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("RoundTrip did not receive the large buffered payload")
 	}
 }
