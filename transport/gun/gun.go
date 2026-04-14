@@ -37,6 +37,8 @@ var defaultHeader = http.Header{
 	"User-Agent":   []string{"grpc-go/1.36.0"},
 }
 
+const requestBodyBufferSize = 64 * 1024
+
 type DialFn = func(ctx context.Context, network, addr string) (net.Conn, error)
 
 type Conn struct {
@@ -54,8 +56,93 @@ type Conn struct {
 	closed     bool
 	onClose    func()
 
-	// deadlines
-	deadline *time.Timer
+	deadlineMutex sync.Mutex
+	deadlineTimer connTimer
+	deadlineSeq   uint64
+}
+
+type connTimer interface {
+	Stop() bool
+}
+
+var newConnTimer = func(d time.Duration, f func()) connTimer {
+	return time.AfterFunc(d, f)
+}
+
+type requestBodyPipe struct {
+	mu      sync.Mutex
+	cond    *sync.Cond
+	buf     []byte
+	closed  bool
+	readErr error
+	maxSize int
+}
+
+func newRequestBodyPipe(maxSize int) *requestBodyPipe {
+	p := &requestBodyPipe{maxSize: maxSize}
+	p.cond = sync.NewCond(&p.mu)
+	return p
+}
+
+func (p *requestBodyPipe) Read(b []byte) (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for len(p.buf) == 0 && !p.closed {
+		p.cond.Wait()
+	}
+
+	if len(p.buf) == 0 {
+		if p.readErr != nil {
+			return 0, p.readErr
+		}
+		return 0, io.EOF
+	}
+
+	n := copy(b, p.buf)
+	p.buf = p.buf[n:]
+	p.cond.Broadcast()
+	return n, nil
+}
+
+func (p *requestBodyPipe) Write(b []byte) (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	written := 0
+	for written < len(b) {
+		for len(p.buf) >= p.maxSize && !p.closed {
+			p.cond.Wait()
+		}
+
+		if p.closed {
+			return written, io.ErrClosedPipe
+		}
+
+		space := p.maxSize - len(p.buf)
+		if space > len(b)-written {
+			space = len(b) - written
+		}
+		p.buf = append(p.buf, b[written:written+space]...)
+		written += space
+		p.cond.Broadcast()
+	}
+
+	return len(b), nil
+}
+
+func (p *requestBodyPipe) Close() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.closed {
+		return nil
+	}
+
+	p.closed = true
+	p.readErr = io.EOF
+	p.cond.Broadcast()
+	return nil
 }
 
 type Config struct {
@@ -87,6 +174,15 @@ func (g *Conn) initReader() {
 }
 
 func (g *Conn) Init() error {
+	g.closeMutex.Lock()
+	closed := g.closed
+	if closed && g.initErr == nil {
+		g.initErr = net.ErrClosed
+	}
+	g.closeMutex.Unlock()
+	if closed {
+		return g.initErr
+	}
 	g.initOnce.Do(g.initReader)
 	return g.initErr
 }
@@ -184,6 +280,14 @@ func (g *Conn) FrontHeadroom() int {
 }
 
 func (g *Conn) Close() error {
+	g.deadlineMutex.Lock()
+	g.deadlineSeq++
+	if timer := g.deadlineTimer; timer != nil {
+		_ = timer.Stop()
+		g.deadlineTimer = nil
+	}
+	g.deadlineMutex.Unlock()
+
 	g.closeMutex.Lock()
 	defer g.closeMutex.Unlock()
 	if g.closed {
@@ -222,26 +326,43 @@ func (g *Conn) SetReadDeadline(t time.Time) error  { return g.SetDeadline(t) }
 func (g *Conn) SetWriteDeadline(t time.Time) error { return g.SetDeadline(t) }
 
 func (g *Conn) SetDeadline(t time.Time) error {
+	g.deadlineMutex.Lock()
+	defer g.deadlineMutex.Unlock()
+
+	g.deadlineSeq++
+	if timer := g.deadlineTimer; timer != nil {
+		_ = timer.Stop()
+		g.deadlineTimer = nil
+	}
+
 	if t.IsZero() {
-		if g.deadline != nil {
-			g.deadline.Stop()
-			g.deadline = nil
-		}
 		return nil
 	}
+
 	d := time.Until(t)
-	if g.deadline != nil {
-		g.deadline.Reset(d)
+	if d <= 0 {
+		go g.Close()
 		return nil
 	}
-	g.deadline = time.AfterFunc(d, func() {
-		g.Close()
+
+	seq := g.deadlineSeq
+	var timer connTimer
+	timer = newConnTimer(d, func() {
+		g.deadlineMutex.Lock()
+		if g.deadlineSeq != seq || g.deadlineTimer != timer {
+			g.deadlineMutex.Unlock()
+			return
+		}
+		g.deadlineTimer = nil
+		g.deadlineMutex.Unlock()
+		_ = g.Close()
 	})
+	g.deadlineTimer = timer
 	return nil
 }
 
 type Transport struct {
-	transport *http.Http2Transport
+	transport http.RoundTripper
 	cfg       *Config
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -318,7 +439,7 @@ func (t *Transport) Dial() (net.Conn, error) {
 	}
 	path := ServiceNameToPath(serviceName)
 
-	reader, writer := io.Pipe()
+	body := newRequestBodyPipe(requestBodyBufferSize)
 
 	header := defaultHeader.Clone()
 	if t.cfg.UserAgent != "" {
@@ -327,7 +448,7 @@ func (t *Transport) Dial() (net.Conn, error) {
 
 	request := &http.Request{
 		Method: http.MethodPost,
-		Body:   reader,
+		Body:   body,
 		URL: &url.URL{
 			Scheme: "https",
 			Host:   t.cfg.Host,
@@ -341,11 +462,9 @@ func (t *Transport) Dial() (net.Conn, error) {
 		Header:     header,
 	}
 	request = request.WithContext(t.ctx)
-	initStarted := make(chan struct{})
 
 	conn := &Conn{
 		initFn: func(addr *httputils.NetAddr) (io.ReadCloser, error) {
-			close(initStarted)
 			request = request.WithContext(httputils.NewAddrContext(addr, request.Context()))
 			response, err := t.transport.RoundTrip(request)
 			if err != nil {
@@ -353,17 +472,13 @@ func (t *Transport) Dial() (net.Conn, error) {
 			}
 			return response.Body, nil
 		},
-		writer: writer,
+		writer: body,
 	}
 
 	t.count.Add(1)
 	conn.onClose = func() { t.count.Add(-1) }
 
 	go conn.Init()
-
-	// ensure conn.initOnce.Do has been called before return
-	// prevent the race caused by the return side immediately calling conn.Close
-	<-initStarted
 
 	return conn, nil
 }
