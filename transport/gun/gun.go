@@ -52,8 +52,17 @@ type Conn struct {
 	closeMutex sync.Mutex
 	closed     bool
 
-	// deadlines
-	deadline *time.Timer
+	deadlineMutex sync.Mutex
+	deadlineTimer connTimer
+	deadlineSeq   uint64
+}
+
+type connTimer interface {
+	Stop() bool
+}
+
+var newConnTimer = func(d time.Duration, f func()) connTimer {
+	return time.AfterFunc(d, f)
 }
 
 type Config struct {
@@ -85,6 +94,15 @@ func (g *Conn) initReader() {
 }
 
 func (g *Conn) Init() error {
+	g.closeMutex.Lock()
+	closed := g.closed
+	if closed && g.initErr == nil {
+		g.initErr = net.ErrClosed
+	}
+	g.closeMutex.Unlock()
+	if closed {
+		return g.initErr
+	}
 	g.initOnce.Do(g.initReader)
 	return g.initErr
 }
@@ -179,6 +197,14 @@ func (g *Conn) FrontHeadroom() int {
 }
 
 func (g *Conn) Close() error {
+	g.deadlineMutex.Lock()
+	g.deadlineSeq++
+	if timer := g.deadlineTimer; timer != nil {
+		_ = timer.Stop()
+		g.deadlineTimer = nil
+	}
+	g.deadlineMutex.Unlock()
+
 	g.closeMutex.Lock()
 	defer g.closeMutex.Unlock()
 	if g.closed {
@@ -213,21 +239,38 @@ func (g *Conn) SetReadDeadline(t time.Time) error  { return g.SetDeadline(t) }
 func (g *Conn) SetWriteDeadline(t time.Time) error { return g.SetDeadline(t) }
 
 func (g *Conn) SetDeadline(t time.Time) error {
+	g.deadlineMutex.Lock()
+	defer g.deadlineMutex.Unlock()
+
+	g.deadlineSeq++
+	if timer := g.deadlineTimer; timer != nil {
+		_ = timer.Stop()
+		g.deadlineTimer = nil
+	}
+
 	if t.IsZero() {
-		if g.deadline != nil {
-			g.deadline.Stop()
-			g.deadline = nil
-		}
 		return nil
 	}
+
 	d := time.Until(t)
-	if g.deadline != nil {
-		g.deadline.Reset(d)
+	if d <= 0 {
+		go g.Close()
 		return nil
 	}
-	g.deadline = time.AfterFunc(d, func() {
-		g.Close()
+
+	seq := g.deadlineSeq
+	var timer connTimer
+	timer = newConnTimer(d, func() {
+		g.deadlineMutex.Lock()
+		if g.deadlineSeq != seq || g.deadlineTimer != timer {
+			g.deadlineMutex.Unlock()
+			return
+		}
+		g.deadlineTimer = nil
+		g.deadlineMutex.Unlock()
+		_ = g.Close()
 	})
+	g.deadlineTimer = timer
 	return nil
 }
 
