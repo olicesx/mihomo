@@ -46,6 +46,7 @@ var realityShortid = "10f897e26c4b9478"
 var realityRealDial = false
 var echPublicSni = "public.sni"
 var echConfigBase64, echKeyPem, _ = ech.GenECHConfig(echPublicSni)
+var grpcTestSemaphore = make(chan struct{}, 1)
 
 func init() {
 	rand.Read(httpData)
@@ -55,6 +56,20 @@ func init() {
 	}
 	realityPrivateKey = base64.RawURLEncoding.EncodeToString(privateKey.Bytes())
 	realityPublickey = base64.RawURLEncoding.EncodeToString(privateKey.PublicKey().Bytes())
+}
+
+func enterInboundHelper(t *testing.T, network string) {
+	t.Helper()
+
+	if network != "grpc" {
+		t.Parallel()
+		return
+	}
+
+	grpcTestSemaphore <- struct{}{}
+	t.Cleanup(func() {
+		<-grpcTestSemaphore
+	})
 }
 
 type TestTunnel struct {

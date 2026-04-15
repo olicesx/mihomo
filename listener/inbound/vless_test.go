@@ -12,7 +12,7 @@ import (
 )
 
 func testInboundVless(t *testing.T, inboundOptions inbound.VlessOption, outboundOptions outbound.VlessOption) {
-	t.Parallel()
+	enterInboundHelper(t, outboundOptions.Network)
 	inboundOptions.BaseOption = inbound.BaseOption{
 		NameStr: "vless_inbound",
 		Listen:  "127.0.0.1",
